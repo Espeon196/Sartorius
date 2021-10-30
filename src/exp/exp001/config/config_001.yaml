@@ -1,0 +1,41 @@
+meta:
+  run_name: Simple Baseline
+  csv_file: train_labels.csv
+  bucket_name: brain-tumor-mlflow
+  DEBUG: False
+
+base:
+  seed: 719
+  img_size: 256
+  fold_num: 5
+  epochs: 5
+  optuna: false
+  train_bs: 8
+  valid_bs: 16
+  num_workers: 4
+  accum_iter: 2
+  verbose_step: 1
+  trn_schd_batch_update: false
+  val_schd_loss_update: true
+
+dataset:
+  name: BrainTumor2dSimpleDataset
+
+model:
+  name: BrainTumor2dModel
+  model_arch: efficientnet_b0
+  pretrained: true
+
+optimizer:
+  name: Adam
+  lr: 1.0e-3
+  weight_decay: 0.0
+
+scheduler:
+  name: ReduceLROnPlateau
+  mode: min
+  patience: 3
+  min_lr: 1.0e-6
+
+criterion:
+  name: BCEWithLogitsLoss
