@@ -1,10 +1,12 @@
+import collections
+
 import pandas as pd
 from albumentations import (
     HorizontalFlip, VerticalFlip, IAAPerspective, ShiftScaleRotate, CLAHE, RandomRotate90, RandomCrop,
     Transpose, ShiftScaleRotate, Blur, OpticalDistortion, GridDistortion, HueSaturationValue,
     IAAAdditiveGaussianNoise, GaussNoise, MotionBlur, MedianBlur, IAAPiecewiseAffine, RandomResizedCrop,
     IAASharpen, IAAEmboss, RandomBrightnessContrast, Flip, OneOf, Compose, Normalize, Cutout, CoarseDropout,
-    ShiftScaleRotate, CenterCrop, Resize
+    ShiftScaleRotate, CenterCrop, Resize, BboxParams
 )
 
 from albumentations.pytorch import ToTensorV2
@@ -14,123 +16,176 @@ from torch.utils.data import Dataset
 
 import glob
 import cv2
+from PIL import Image, ImageDraw
 import numpy as np
 import os
 import matplotlib.pyplot as plt
 
-import pydicom
+WIDTH = 704
+HEIGHT = 520
 
-def get_train_transforms(img_size):
+def get_train_transforms():
     return Compose([
         # RandomResizedCrop(img_size, img_size),
         # RandomCrop(img_size, img_size),
         #Resize(img_size, img_size),
-        Transpose(p=0.5),
+        #Transpose(p=0.5),
         HorizontalFlip(p=0.5),
         VerticalFlip(p=0.5),
         #ShiftScaleRotate(p=1.0),
-        HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2, val_shift_limit=0.2, p=0.5),
-        RandomBrightnessContrast(brightness_limit=(-0.1, 0.1), contrast_limit=(-0.1, 0.1), p=0.5),
+        #HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2, val_shift_limit=0.2, p=0.5),
+        #RandomBrightnessContrast(brightness_limit=(-0.1, 0.1), contrast_limit=(-0.1, 0.1), p=0.5),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], max_pixel_value=255.0, p=1.0),
-        CoarseDropout(p=0.5),
+        #CoarseDropout(p=0.5),
         #Cutout(p=0.5),
         ToTensorV2(p=1.0),
-    ], p=1.)
+    ], p=1., bbox_params=BboxParams(format='pascal_voc', label_fields=["bbox_classes"]))
 
-
-def get_valid_transforms(img_size):
+def get_check_transforms():
     return Compose([
-        # CenterCrop(img_size, img_size, p=1.),
+        HorizontalFlip(p=0.5),
+        VerticalFlip(p=0.5),
+        ToTensorV2(p=1.0),
+    ], p=1., bbox_params=BboxParams(format='pascal_voc', label_fields=["bbox_classes"]))
+
+def get_valid_transforms():
+    return Compose([
+        #CenterCrop(img_size, img_size, p=1.),
         #Resize(img_size, img_size),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], max_pixel_value=255.0, p=1.0),
         ToTensorV2(p=1.0),
-    ], p=1.)
+    ], p=1., bbox_params=BboxParams(format='pascal_voc', label_fields=["bbox_classes"]))
 
 
-def get_inference_transforms(img_size):
+def get_inference_transforms():
     return Compose([
         # RandomResizedCrop(img_size, img_size),
         # RandomCrop(img_size, img_size),
         #Resize(img_size, img_size),
-        Transpose(p=0.5),
+        #Transpose(p=0.5),
         HorizontalFlip(p=0.5),
         VerticalFlip(p=0.5),
-        ShiftScaleRotate(p=1.0),
-        HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2, val_shift_limit=0.2, p=0.5),
-        RandomBrightnessContrast(brightness_limit=(-0.1, 0.1), contrast_limit=(-0.1, 0.1), p=0.5),
+        #ShiftScaleRotate(p=1.0),
+        #HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2, val_shift_limit=0.2, p=0.5),
+        #RandomBrightnessContrast(brightness_limit=(-0.1, 0.1), contrast_limit=(-0.1, 0.1), p=0.5),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], max_pixel_value=255.0, p=1.0),
         ToTensorV2(p=1.0),
-    ], p=1.)
+    ], p=1., bbox_params=BboxParams(format='pascal_voc', label_fields=["bbox_classes"]))
 
-class BrainTumor2dSimpleDataset(Dataset):
-    def __init__(self, df, data_path, img_size, transforms=None, output_label=True):
-        self.paths = df["BraTS21ID"].values
-        self.output_label = output_label
-        if self.output_label:
-            self.targets = df["MGMT_value"].values
-        self.data_path = data_path
-        self.img_size = img_size
+def rle_decode(mask_rle, shape, color=1):
+    '''
+    :param mask_rle: run-length as string formated (start length)
+    :param shape: (height, width) of array to return
+    :return: numpy array, 1-mask, 0-background
+    '''
+    s = mask_rle.split()
+    starts, lengths = [np.asarray(x, dtype=int) for x in (s[0:][::2], s[1:][::2])]
+    starts -= 1
+    ends = starts + lengths
+    img = np.zeros(shape[0] * shape[1], dtype=np.float32)
+    for lo, hi in zip(starts, ends):
+        img[lo: hi] = color
+    return img.reshape(shape)
+
+class CellDataset(Dataset):
+    def __init__(self, image_dir, df, transforms=None):
         self.transforms = transforms
+        self.image_dir = image_dir
+        self.df = df
+
+        self.height = HEIGHT
+        self.width = WIDTH
+
+        self.image_info = collections.defaultdict(dict)
+        temp_df = self.df.groupby('id')['annotation'].agg(lambda x: list(x)).reset_index()
+        for index, row in temp_df.iterrows():
+            self.image_info[index] = {
+                'image_id': row['id'],
+                'image_path': os.path.join(self.image_dir, row['id']+'.png'),
+                'annotations': row['annotation']
+            }
+
+    def get_box(self, a_mask):
+        '''Get the bounding box of a given mask'''
+        pos = np.where(a_mask)
+        xmin = np.min(pos[1])
+        xmax = np.max(pos[1])
+        ymin = np.min(pos[0])
+        ymax = np.max(pos[0])
+        return [xmin, ymin, xmax, ymax]
+
+    def __getitem__(self, idx):
+        '''Get the image and the target'''
+        img_path = self.image_info[idx]["image_path"]
+        img = Image.open(img_path).convert("RGB")
+        img = np.array(img)
+
+        info = self.image_info[idx]
+
+        n_objects = len(info['annotations'])
+        masks = []
+        boxes = []
+
+        for i, annotation in enumerate(info['annotations']):
+            a_mask = rle_decode(annotation, (HEIGHT, WIDTH))
+            a_mask = Image.fromarray(a_mask)
+            a_mask = np.where(np.array(a_mask) > 0, 1, 0)
+            masks.append(a_mask)
+            boxes.append(self.get_box(a_mask))
+
+        labels = [1 for _ in range(n_objects)]
+
+        if self.transforms is not None:
+            transformed = self.transforms(image=img, masks=masks, bboxes=boxes, bbox_classes=labels)
+            img = transformed['image']
+            masks = transformed['masks']
+            boxes = transformed['bboxes']
+            labels = transformed['bbox_classes']
+
+        boxes = torch.as_tensor(boxes, dtype=torch.float32)
+        labels = torch.as_tensor(labels, dtype=torch.int64)
+        masks = torch.as_tensor(masks, dtype=torch.uint8)
+
+        image_id = torch.tensor([idx])
+        area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
+        is_crowd = torch.zeros((n_objects,), dtype=torch.int64)
+
+        # This is the required target for the Mask R-CNN
+        target = {
+            'boxes': boxes,
+            'labels': labels,
+            'masks': masks,
+            'image_id': image_id,
+            'area': area,
+            'iscrowd': is_crowd
+        }
+        return img, target
 
     def __len__(self):
-        return len(self.paths)
+        return len(self.image_info)
 
-    def __getitem__(self, index):
-        _id = self.paths[index]
-        patient_path = os.path.join(self.data_path, str(_id).zfill(5))
-        channels = []
-        for t in ("FLAIR", "T1w", "T1wCE"):
-            t_paths = sorted(
-                glob.glob(os.path.join(patient_path, t, '*')),
-                key=lambda x: int(x[:-4].split("-")[-1]),
-            )
-            x = len(t_paths)
-            if x < 10:
-                r = range(x)
-            else:
-                d = x // 10
-                r = range(d, x-d, d)
-            channel = []
-            for i in r:
-                channel.append(cv2.resize(load_dicom(t_paths[i]), (self.img_size, self.img_size))/ 255)
-            channel = np.mean(channel, axis=0)
-            channels.append(channel)
-        channels = np.array(channels).transpose(1, 2, 0).astype(np.float32)
-        #print(channels.shape)
-
-        if self.transforms:
-            channels = self.transforms(image=channels)['image']
-
-        if self.output_label:
-            target = torch.tensor(self.targets[index], dtype=torch.float)
-            return channels, target
-        else:
-            return channels
-
-def load_dicom(path):
-    dicom = pydicom.read_file(path)
-    data = dicom.pixel_array
-    data = data - np.min(data)
-    if np.max(data) != 0:
-        data = data / np.max(data)
-    data = (data * 255).astype(np.uint8)
-    return data
 
 if __name__ == "__main__":
     FILE_DIR = os.path.dirname(os.path.abspath(__file__))
     SRC_DIR = os.path.dirname(os.path.dirname(FILE_DIR))
     INPUT_DIR = os.path.join(SRC_DIR, 'input')
-    df = pd.read_csv(os.path.join(INPUT_DIR, 'train_labels.csv'))
-    ds = BrainTumor2dSimpleDataset(df, data_path=os.path.join(INPUT_DIR, 'train'), img_size=256, transforms=get_train_transforms(256))
+    df = pd.read_csv(os.path.join(INPUT_DIR, 'train.csv'))
+    ds = CellDataset(os.path.join(INPUT_DIR, 'train'), df, transforms=get_check_transforms())
     print("Dataset size: {}".format(len(ds)))
     ds_iter = iter(ds)
-    for i, (channels, target) in enumerate(ds_iter):
-        print("[{}]channels shape: {}, target: {}".format(i, channels.shape, target))
-
-    ds = BrainTumor2dSimpleDataset(df, data_path=os.path.join(INPUT_DIR, 'train'), img_size=256, transforms=None)
-    ds_iter = iter(ds)
-    for i, (channels, target) in enumerate(ds_iter):
-        for j in range(3):
-            plt.subplot(1, 3, j+1)
-            plt.imshow(channels[:, :, j], cmap='gray')
+    for i, (img, target) in enumerate(ds_iter):
+        print("[{}]image shape: {}, masks shape: {}, boxes shape: {}, labels shape: {}".format(i, img.shape, target['masks'].shape, target['boxes'].shape, target['labels'].shape))
+        img = np.array(img).transpose((1, 2, 0))
+        mask = np.array(target['masks']).sum(axis=0, dtype=np.float64).clip(min=0, max=1)
+        result = img.astype(float)/255 * 0.8
+        result[:, :, 0] = result[:, :, 0] + mask * 0.2
+        result = result * 255
+        result = Image.fromarray(result.astype(np.uint8))
+        draw = ImageDraw.Draw(result)
+        boxes = np.array(target['boxes'])
+        for j in range(boxes.shape[0]):
+            draw.rectangle(boxes[j, :], outline=(0, 0, 255))
+        plt.imshow(result)
         plt.show()
+        if i > 10:
+            break
