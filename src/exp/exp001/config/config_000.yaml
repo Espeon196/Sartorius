@@ -2,16 +2,16 @@ meta:
   run_name: Mask R-CNN Baseline
   csv_file: train.csv
   bucket_name: brain-tumor-mlflow
-  DEBUG: false
+  DEBUG: True
 
 base:
   seed: 719
-  fold_num: 5
-  epochs: 8
+  fold_num: 2
+  epochs: 1
   optuna: false
-  train_bs: 8
-  valid_bs: 16
-  num_workers: 4
+  train_bs: 2
+  valid_bs: 2
+  num_workers: 0
   accum_iter: 2
   verbose_step: 5
   trn_schd_batch_update: true
