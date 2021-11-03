@@ -91,14 +91,12 @@ class CellDataset(Dataset):
     def __init__(self, image_dir, df, transforms=None):
         self.transforms = transforms
         self.image_dir = image_dir
-        self.df = df
 
         self.height = HEIGHT
         self.width = WIDTH
 
         self.image_info = collections.defaultdict(dict)
-        temp_df = self.df.groupby('id')['annotation'].agg(lambda x: list(x)).reset_index()
-        for index, row in temp_df.iterrows():
+        for index, row in df.iterrows():
             self.image_info[index] = {
                 'image_id': row['id'],
                 'image_path': os.path.join(self.image_dir, row['id']+'.png'),
@@ -170,6 +168,7 @@ if __name__ == "__main__":
     SRC_DIR = os.path.dirname(os.path.dirname(FILE_DIR))
     INPUT_DIR = os.path.join(SRC_DIR, 'input')
     df = pd.read_csv(os.path.join(INPUT_DIR, 'train.csv'))
+    df = df.groupby('id')['annotation'].agg(lambda x: list(x)).reset_index()
     ds = CellDataset(os.path.join(INPUT_DIR, 'train'), df, transforms=get_check_transforms())
     print("Dataset size: {}".format(len(ds)))
     ds_iter = iter(ds)
@@ -187,5 +186,15 @@ if __name__ == "__main__":
             draw.rectangle(boxes[j, :], outline=(0, 0, 255))
         plt.imshow(result)
         plt.show()
-        if i > 10:
+        if i > 1:
             break
+
+
+    def test(ds):
+        dl = torch.utils.data.DataLoader(ds, batch_size=2, shuffle=False, collate_fn=lambda x: tuple(zip(*x)))
+        for imgs, targets in dl:
+            print(imgs, targets)
+            break
+
+    test(ds)
+
